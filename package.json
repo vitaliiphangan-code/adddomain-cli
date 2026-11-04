@@ -1,0 +1,17 @@
+{
+  "name": "adddomain-cli",
+  "version": "1.0.0",
+  "description": "Read-only CLI for agents and site owners: find a free domain name with dated first-year and renewal prices, print the DNS records for the host, then verify DNS and HTTPS.",
+  "license": "MIT",
+  "author": "Add Domain",
+  "homepage": "https://www.adddomain.net/for-agents",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/vitaliiphangan-code/adddomain-cli.git"
+  },
+  "keywords": ["cli", "custom-domain", "dns", "domain", "github-pages", "lovable", "netlify", "renewal", "replit", "vercel", "website"],
+  "files": ["bin/", "LICENSE", "README.md"],
+  "scripts": { "test": "node --test test/cli.test.mjs" },
+  "bin": { "adddomain": "bin/adddomain.mjs" },
+  "engines": { "node": ">=18" }
+}
