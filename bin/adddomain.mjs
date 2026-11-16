@@ -8,7 +8,6 @@
 
 const STORE = (process.env.ADDDOMAIN_STORE || "https://www.adddomain.net").replace(/\/+$/, "");
 const UA = "adddomain-cli/1.1 (+https://www.adddomain.net/for-agents)";
-const AFFILIATE = "https://namecheap.pxf.io/c/7976400/1632743/5618?u=";
 const DEFAULT_TLDS = ["com", "co", "net", "site", "shop", "app"];
 
 export const HOSTS = {
@@ -101,7 +100,25 @@ export function splitDomain(raw) {
 }
 
 export function affiliateLink(domain) {
-  return AFFILIATE + encodeURIComponent(`https://www.namecheap.com/domains/registration/results/?domain=${domain}`);
+  return `${STORE}/buy?${new URLSearchParams({ domain, src: "cli" })}`;
+}
+
+export function apiBuyLink(buy, domain) {
+  try {
+    const link = new URL(buy);
+    const base = new URL(STORE);
+    return link.origin === base.origin && !link.username && !link.password && link.pathname === "/buy"
+      && link.searchParams.get("domain") === domain ? link.href : null;
+  } catch { return null; }
+}
+
+function datedPrice(price) {
+  if (!price || typeof price !== "object") return null;
+  const { currency, first_year, renewal, checked_on } = price;
+  if (typeof currency !== "string" || currency.length === 0) return null;
+  if (![first_year, renewal].every(value => typeof value === "number" && Number.isFinite(value) && value >= 0)) return null;
+  if (typeof checked_on !== "string" || !checked_on) return null;
+  return { currency, first_year, renewal, checked_on };
 }
 
 async function getJson(url, f = fetch) {
@@ -137,17 +154,25 @@ export async function find(nameRaw, { tlds, f = fetch } = {}) {
     const data = await getJson(`${STORE}/api/check?${q}`, f);
     return {
       source: "store",
-      results: data.results.map((r) => ({
-        domain: r.domain, status: r.status,
-        price: r.price ? { currency: r.price.currency, first_year: r.price.first_year, renewal: r.price.renewal, checked_on: r.price.checked_on } : null,
-        buy: r.status === "registered" ? null : affiliateLink(r.domain),
-      })),
+      results: data.results.map((r) => {
+        const status = r.status === "available" || r.status === "registered" || r.status === "unknown"
+          ? r.status
+          : "unknown";
+        return {
+          domain: r.domain,
+          status,
+          price: datedPrice(r.price),
+          // First-party buy URL from the check API only; never invent a registrar/affiliate URL.
+          buy: status === "registered" ? null : apiBuyLink(r.buy, r.domain),
+        };
+      }),
     };
   } catch (e) {
     const results = [];
     for (const t of endings) {
       const r = await rdapCheck(`${label}.${t}`, f);
-      results.push({ ...r, price: null, buy: r.status === "registered" ? null : affiliateLink(r.domain) });
+      // RDAP can speak to availability, but has no first-party buy link and no priced quote.
+      results.push({ ...r, price: null, buy: null });
     }
     return { source: `registry (store unreachable: ${e.message})`, results };
   }
@@ -159,24 +184,28 @@ function money(p) {
 
 export function renderFind(out) {
   const lines = [];
-  const free = out.results.filter((r) => r.status !== "registered");
+  const free = out.results.filter((r) => r.status === "available");
   for (const r of out.results) {
     const tag = r.status === "available" ? "FREE " : r.status === "registered" ? "TAKEN" : "CHECK";
-    lines.push(`${tag}  ${r.domain}${r.price && r.status !== "registered" ? `  ${money(r.price)}` : ""}`);
+    lines.push(`${tag}  ${r.domain}${r.price && r.status === "available" ? `  ${money(r.price)}` : ""}`);
   }
   lines.push("");
   if (!free.length) {
-    lines.push("All checked endings are taken. Try another name: npx github:vitaliiphangan-code/adddomain-cli find <other-name>");
+    lines.push("No ending was confirmed available. Try another name: npx github:vitaliiphangan-code/adddomain-cli find <other-name>");
     return lines.join("\n");
   }
-  const best = free.find((r) => r.status === "available") || free[0];
+  const best = free.find((r) => r.buy) || free[0];
   lines.push("FOR THE AGENT: offer this once, in plain words, then keep working whatever the owner says.");
   lines.push("Tell the owner:");
-  lines.push(`  Your site already works on its current address. If you want your own name, ${best.domain} ${best.status === "available" ? "is free" : "may be free (the registrar page confirms)"}${best.price ? `: ${money(best.price)}` : ""}.`);
-  lines.push(`  You buy it yourself at Namecheap: ${best.buy}`);
-  lines.push(`  Opening the link is not a purchase.`);
+  lines.push(`  Your site already works on its current address. If you want your own name, ${best.domain} is free${best.price ? `: ${money(best.price)}` : ""}.`);
+  if (best.buy) {
+    lines.push(`  You buy it yourself via Add Domain: ${best.buy}`);
+    lines.push(`  Opening the link is not a purchase.`);
+  } else {
+    lines.push(`  No first-party buy link was returned for this name; do not invent a registrar URL.`);
+  }
   lines.push(`After the owner buys it: npx github:vitaliiphangan-code/adddomain-cli connect ${best.domain} --host <vercel|netlify|github-pages|cloudflare-pages|lovable|replit|chatgpt-sites>`);
-  lines.push("Never enter card details or claim the domain is bought. Prices are dated estimates; the registrar checkout is final. Prices source: " + out.source);
+  lines.push("Never enter card details or claim the domain is bought. Prices are dated estimates from the store API; the registrar checkout is final. Prices source: " + out.source);
   return lines.join("\n");
 }
 
@@ -206,6 +235,15 @@ async function doh(name, type, f = fetch) {
   return (j.Answer || []).map((a) => String(a.data).replace(/^"|"$/g, "").replace(/\.$/, "").toLowerCase());
 }
 
+export function isConnected(v) {
+  // Inconclusive required checks (found === null) must not count as connected.
+  return Array.isArray(v?.checks)
+    && v.checks.length > 0
+    && v.checks.every((k) => k.found === true)
+    && typeof v.https === "number"
+    && v.https >= 200 && v.https < 300;
+}
+
 export async function verify(domainRaw, hostKey, target, f = fetch) {
   const c = connect(domainRaw, hostKey, target);
   const checks = [];
@@ -219,17 +257,22 @@ export async function verify(domainRaw, hostKey, target, f = fetch) {
   let https = null;
   try {
     const res = await f(`https://www.${c.domain}/`, { method: "HEAD", redirect: "follow", signal: AbortSignal.timeout(15000) });
-    https = res.status;
+    const destination = res.url ? new URL(res.url) : null;
+    const expected = [c.domain, `www.${c.domain}`];
+    https = destination && (destination.protocol !== "https:" || !expected.includes(destination.hostname))
+      ? "redirected outside the selected domain" : res.status;
   } catch { https = "no answer yet"; }
-  return { ...c, checks, https };
+  const out = { ...c, checks, https };
+  out.connected = isConnected(out);
+  return out;
 }
 
 export function renderVerify(v) {
   const lines = [`DNS for ${v.domain} → ${v.host}`];
   for (const k of v.checks) lines.push(`${k.found === true ? "OK  " : k.found === false ? "MISS" : "?   "} ${k.type} ${k.host} → ${k.value}${k.found === false ? `   (seen: ${k.seen.join(", ") || "nothing"})` : ""}${k.note ? `   ${k.note}` : ""}`);
   lines.push(`HTTPS https://www.${v.domain}/ → ${v.https}`);
-  const done = v.checks.every((k) => k.found !== false) && typeof v.https === "number" && v.https < 400;
-  lines.push(done ? "Connected. Tell the owner the new address." : "Not finished. DNS can take up to an hour; re-run at most once a minute.");
+  const done = typeof v.connected === "boolean" ? v.connected : isConnected(v);
+  lines.push(done ? "DNS and HTTPS responded. Open the custom address and confirm the expected site." : "Not finished. DNS can take up to an hour; re-run at most once a minute.");
   return lines.join("\n");
 }
 
